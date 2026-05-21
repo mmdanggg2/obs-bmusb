@@ -56,7 +56,8 @@ struct bmusb_inst {
 	obs_source_t            *source;
 	BMUSBCapture            *capture;
 	int                     card_index;
-	std::vector<uint8_t>    buffer;
+	std::vector<uint8_t>    video_buffer;
+	std::vector<uint8_t>    audio_buffer;
 };
 
 static const char *bmusb_getname(void *unused)
@@ -134,8 +135,6 @@ static void bmusb_update(void *data, obs_data_t *settings)
 			FrameAllocator::Frame video_frame, size_t video_offset, VideoFormat video_format,
 			FrameAllocator::Frame audio_frame, size_t audio_offset, AudioFormat audio_format
 		) {
-			uint64_t cur_time = os_gettime_ns();
-
 			if (!video_format.is_connected) {
 				std::cerr << "Input unconnected, dropping frame" << std::endl;
 				rt->capture->get_video_frame_allocator()->release_frame(video_frame);
@@ -168,14 +167,14 @@ static void bmusb_update(void *data, obs_data_t *settings)
 					frame.format = VIDEO_FORMAT_UYVY;
 				}
 				frame.linesize[0] = video_format.stride;
-				frame.timestamp = cur_time;
+				frame.timestamp = video_frame.received_timestamp.time_since_epoch().count();
 
 				if (video_format.interlaced && video_format.second_field_start != 1) {
 					size_t buffer_size = video_format.stride * video_format.height;
-			    rt->buffer.resize(buffer_size);
+					rt->video_buffer.resize(buffer_size);
 
 					uint8_t *source = video_frame.data + video_offset + video_format.extra_lines_top * video_format.stride;
-					uint8_t *dest = rt->buffer.data();
+					uint8_t *dest = rt->video_buffer.data();
 					uint8_t *end = dest + video_format.height * video_format.stride;
 					while (dest < end) {
 						memcpy(dest, source, video_format.stride);
@@ -184,16 +183,16 @@ static void bmusb_update(void *data, obs_data_t *settings)
 					}
 
 					source = video_frame.data + video_offset + video_format.second_field_start * video_format.stride;
-					dest = rt->buffer.data() + video_format.stride;
+					dest = rt->video_buffer.data() + video_format.stride;
 					while (dest < end) {
 						memcpy(dest, source, video_format.stride);
 						source += video_format.stride;
 						dest += 2 * video_format.stride;
 					}
 
-					frame.data[0] = rt->buffer.data();
+					frame.data[0] = rt->video_buffer.data();
 				} else {
-			    rt->buffer.resize(0);
+					rt->video_buffer.resize(0);
 					frame.data[0] = video_frame.data + video_offset + video_format.extra_lines_top * video_format.stride;
 				}
 
@@ -206,12 +205,31 @@ static void bmusb_update(void *data, obs_data_t *settings)
 			if (audio_frame.data != nullptr) {
 				struct obs_source_audio audio;
 				audio.samples_per_sec = audio_format.sample_rate;
+				uint32_t bps = audio_format.bits_per_sample;
 				audio.frames = (audio_frame.len > audio_offset) ?
 					(audio_frame.len - audio_offset) / audio_format.num_channels /
-					(audio_format.bits_per_sample / 8) : 0;
-				audio.format = AUDIO_FORMAT_32BIT;
-				audio.data[0] = audio_frame.data + audio_offset;
-				audio.timestamp = cur_time;
+					(bps / 8) : 0;
+
+				if (bps == 24) {
+					size_t required_size = audio.frames * audio_format.num_channels * 4;
+					rt->audio_buffer.resize(required_size);
+
+					const uint8_t *in = audio_frame.data + audio_offset;
+					int32_t *out = (int32_t *)rt->audio_buffer.data();
+					for (size_t i = 0; i < audio.frames * audio_format.num_channels; i++) {
+						uint32_t val = ((uint32_t)in[i * 3 + 0] << 8) |
+							       ((uint32_t)in[i * 3 + 1] << 16) |
+							       ((uint32_t)in[i * 3 + 2] << 24);
+						out[i] = (int32_t)val;
+					}
+					audio.format = AUDIO_FORMAT_32BIT;
+					audio.data[0] = rt->audio_buffer.data();
+				} else {
+					audio.format = (bps == 16) ? AUDIO_FORMAT_16BIT : AUDIO_FORMAT_32BIT;
+					audio.data[0] = audio_frame.data + audio_offset;
+				}
+
+				audio.timestamp = audio_frame.received_timestamp.time_since_epoch().count();
 				switch (audio_format.num_channels) {
 					case 1: audio.speakers = SPEAKERS_MONO; break;
 					case 2: audio.speakers = SPEAKERS_STEREO; break;
@@ -233,7 +251,8 @@ static void *bmusb_create(obs_data_t *settings, obs_source_t *source)
 {
 	struct bmusb_inst *rt = (bmusb_inst *)bzalloc(sizeof(struct bmusb_inst));
 	rt->source = source;
-	rt->buffer = std::vector<uint8_t>();
+	rt->video_buffer = std::vector<uint8_t>();
+	rt->audio_buffer = std::vector<uint8_t>();
 
 	bmusb_update(rt, settings);
 
