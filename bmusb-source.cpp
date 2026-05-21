@@ -87,8 +87,7 @@ static void bmusb_destroy(void *data)
 
 	if (rt) {
 		bmusb_cleanup(rt);
-
-		bfree(rt);
+		delete rt;
 	}
 }
 
@@ -249,10 +248,8 @@ static void bmusb_update(void *data, obs_data_t *settings)
 
 static void *bmusb_create(obs_data_t *settings, obs_source_t *source)
 {
-	struct bmusb_inst *rt = (bmusb_inst *)bzalloc(sizeof(struct bmusb_inst));
+	struct bmusb_inst *rt = new bmusb_inst();
 	rt->source = source;
-	rt->video_buffer = std::vector<uint8_t>();
-	rt->audio_buffer = std::vector<uint8_t>();
 
 	bmusb_update(rt, settings);
 
